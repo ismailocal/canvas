@@ -1,49 +1,23 @@
 const TOOLBAR = [
-  { key: 'select', label: 'Select', shortcut: 'V' },
-  { key: 'hand', label: 'Hand', shortcut: 'H' },
-  { key: 'rectangle', label: 'Rect', shortcut: 'R' },
-  { key: 'ellipse', label: 'Ellipse', shortcut: 'E' },
-  { key: 'line', label: 'Line', shortcut: 'L' },
-  { key: 'freehand', label: 'Pen', shortcut: 'P' },
-  { key: 'text', label: 'Text', shortcut: 'T' },
+  { key: 'select', label: 'Select', shortcut: 'V', icon: '↖' },
+  { key: 'hand', label: 'Hand', shortcut: 'H', icon: '✋' },
+  { key: 'rectangle', label: 'Rectangle', shortcut: 'R', icon: '▭' },
+  { key: 'ellipse', label: 'Ellipse', shortcut: 'E', icon: '◯' },
+  { key: 'line', label: 'Line', shortcut: 'L', icon: '／' },
+  { key: 'freehand', label: 'Draw', shortcut: 'P', icon: '✎' },
+  { key: 'text', label: 'Text', shortcut: 'T', icon: 'A' },
 ];
 
-const ROADMAP = [
-  'Command pattern + immutable patch tabanlı history katmanı',
-  'Selection box, resize handles ve rotation handles',
-  'Canvas üstünde HTML text edit overlay',
-  'Shape registry, serializer ve plugin lifecycle',
-  'Yjs/CRDT ile gerçek zamanlı collaboration adaptörü',
-  'IndexedDB/local snapshot persistence',
-  'Spatial index ve dirty rectangle performans optimizasyonları',
-];
+const STYLE_PRESETS = {
+  rectangle: { stroke: '#8b5cf6', fill: 'rgba(139, 92, 246, 0.18)', strokeWidth: 2, opacity: 1 },
+  ellipse: { stroke: '#06b6d4', fill: 'rgba(6, 182, 212, 0.16)', strokeWidth: 2, opacity: 1 },
+  line: { stroke: '#f8fafc', strokeWidth: 3, opacity: 1 },
+  freehand: { stroke: '#f59e0b', strokeWidth: 3, opacity: 1 },
+  text: { stroke: '#f8fafc', fontSize: 28, opacity: 1 },
+};
 
 const DEFAULT_STATE = {
-  shapes: [
-    {
-      id: 'seed-rect',
-      type: 'rectangle',
-      x: 96,
-      y: 96,
-      width: 220,
-      height: 120,
-      stroke: '#111827',
-      fill: 'rgba(59, 130, 246, 0.12)',
-      strokeWidth: 2,
-      opacity: 1,
-    },
-    {
-      id: 'seed-text',
-      type: 'text',
-      x: 120,
-      y: 158,
-      text: 'Whiteboard starter\nçizmeye hazır.',
-      fontSize: 24,
-      fontFamily: 'Inter, Arial, sans-serif',
-      stroke: '#111827',
-      opacity: 1,
-    },
-  ],
+  shapes: [],
   selectedIds: [],
   activeTool: 'select',
   viewport: { x: 0, y: 0, zoom: 1 },
@@ -51,8 +25,7 @@ const DEFAULT_STATE = {
   drawingShapeId: null,
   isDraggingSelection: false,
   isPanning: false,
-  stroke: '#111827',
-  fill: 'transparent',
+  isSpacePanning: false,
 };
 
 const createId = () => Math.random().toString(36).slice(2, 10);
@@ -73,13 +46,36 @@ function pointToSegmentDistance(point, a, b) {
   return distance(point, { x: a.x + clampedT * dx, y: a.y + clampedT * dy });
 }
 
+function hexToRgba(hex, alpha = 1) {
+  const safe = hex.replace('#', '');
+  const [r, g, b] = safe.length === 3
+    ? safe.split('').map((item) => parseInt(item + item, 16))
+    : [safe.slice(0, 2), safe.slice(2, 4), safe.slice(4, 6)].map((item) => parseInt(item, 16));
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function rgbaToHex(color) {
+  if (!color || color === 'transparent') return '#ffffff';
+  if (color.startsWith('#')) return color;
+  const values = color.match(/\d+/g);
+  if (!values || values.length < 3) return '#ffffff';
+  return `#${values.slice(0, 3).map((value) => Number(value).toString(16).padStart(2, '0')).join('')}`;
+}
+
+function getOpacityFromColor(color) {
+  if (!color || color === 'transparent') return 0;
+  const values = color.match(/[\d.]+/g);
+  if (!values || values.length < 4) return 1;
+  return clamp(Number(values[3]), 0, 1);
+}
+
 function getTextMetrics(shape) {
   const lines = shape.text.split('\n');
   const fontSize = shape.fontSize || 20;
   return {
     lines,
-    width: Math.max(40, Math.max(...lines.map((line) => line.length)) * fontSize * 0.6),
-    height: lines.length * fontSize * 1.2,
+    width: Math.max(40, Math.max(...lines.map((line) => line.length || 1)) * fontSize * 0.62),
+    height: Math.max(fontSize, lines.length * fontSize * 1.25),
   };
 }
 
@@ -101,7 +97,7 @@ function getShapeBounds(shape) {
       const maxX = Math.max(shape.x, ...xs);
       const minY = Math.min(shape.y, ...ys);
       const maxY = Math.max(shape.y, ...ys);
-      return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+      return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
     }
     default:
       return { x: 0, y: 0, width: 0, height: 0 };
@@ -109,8 +105,17 @@ function getShapeBounds(shape) {
 }
 
 function isPointInsideShape(point, shape) {
-  if (shape.type === 'rectangle' || shape.type === 'ellipse') {
+  if (shape.type === 'rectangle') {
     return point.x >= shape.x && point.x <= shape.x + shape.width && point.y >= shape.y && point.y <= shape.y + shape.height;
+  }
+
+  if (shape.type === 'ellipse') {
+    const radiusX = shape.width / 2;
+    const radiusY = shape.height / 2;
+    if (!radiusX || !radiusY) return false;
+    const centerX = shape.x + radiusX;
+    const centerY = shape.y + radiusY;
+    return (((point.x - centerX) ** 2) / (radiusX ** 2)) + (((point.y - centerY) ** 2) / (radiusY ** 2)) <= 1;
   }
 
   if (shape.type === 'text') {
@@ -122,7 +127,7 @@ function isPointInsideShape(point, shape) {
     for (let i = 0; i < shape.points.length - 1; i += 1) {
       const a = { x: shape.x + shape.points[i].x, y: shape.y + shape.points[i].y };
       const b = { x: shape.x + shape.points[i + 1].x, y: shape.y + shape.points[i + 1].y };
-      if (pointToSegmentDistance(point, a, b) <= 6) return true;
+      if (pointToSegmentDistance(point, a, b) <= Math.max(8, (shape.strokeWidth || 2) + 4)) return true;
     }
   }
 
@@ -235,24 +240,16 @@ class WhiteboardStore {
     this.notify();
     this.bus.emit('selection:changed', { ids });
   }
-
-  commitHistory(reason) {
-    this.bus.emit('history:commit', { reason });
-  }
-
-  resetScene() {
-    this.state = clone(DEFAULT_STATE);
-    this.notify();
-    this.bus.emit('history:commit', { reason: 'reset scene' });
-  }
 }
 
 function renderShape(ctx, shape, isSelected) {
   ctx.save();
   ctx.globalAlpha = shape.opacity ?? 1;
   ctx.lineWidth = shape.strokeWidth || 2;
-  ctx.strokeStyle = shape.stroke || '#111827';
+  ctx.strokeStyle = shape.stroke || '#f8fafc';
   ctx.fillStyle = shape.fill || 'transparent';
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
 
   switch (shape.type) {
     case 'rectangle':
@@ -278,48 +275,36 @@ function renderShape(ctx, shape, isSelected) {
       break;
     case 'text': {
       const fontSize = shape.fontSize || 20;
-      ctx.fillStyle = shape.stroke || '#111827';
+      ctx.fillStyle = shape.stroke || '#f8fafc';
       ctx.font = `${fontSize}px ${shape.fontFamily || 'Inter, Arial, sans-serif'}`;
-      shape.text.split('\n').forEach((line, index) => ctx.fillText(line, shape.x, shape.y + index * fontSize * 1.2));
+      shape.text.split('\n').forEach((line, index) => ctx.fillText(line, shape.x, shape.y + index * fontSize * 1.25));
       break;
     }
+    default:
+      break;
   }
 
   if (isSelected) {
     const bounds = getShapeBounds(shape);
-    ctx.setLineDash([6, 4]);
-    ctx.strokeStyle = '#2563eb';
+    ctx.setLineDash([7, 5]);
+    ctx.strokeStyle = '#8b5cf6';
     ctx.lineWidth = 1;
-    ctx.strokeRect(bounds.x - 4, bounds.y - 4, bounds.width + 8, bounds.height + 8);
+    ctx.strokeRect(bounds.x - 6, bounds.y - 6, bounds.width + 12, bounds.height + 12);
   }
 
   ctx.restore();
 }
 
-function drawGrid(ctx, width, height, viewport) {
-  const gridSize = 40 * viewport.zoom;
-  if (gridSize < 12) return;
-  const offsetX = viewport.x % gridSize;
-  const offsetY = viewport.y % gridSize;
-
+function renderWelcome(canvas, ctx) {
+  const { width, height } = canvas.getBoundingClientRect();
   ctx.save();
-  ctx.strokeStyle = '#e2e8f0';
-  ctx.lineWidth = 1;
-
-  for (let x = offsetX; x < width; x += gridSize) {
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, height);
-    ctx.stroke();
-  }
-
-  for (let y = offsetY; y < height; y += gridSize) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(width, y);
-    ctx.stroke();
-  }
-
+  ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'center';
+  ctx.font = '600 32px Inter, Arial, sans-serif';
+  ctx.fillText('Welcome to your whiteboard', width / 2, height / 2 - 10);
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.font = '16px Inter, Arial, sans-serif';
+  ctx.fillText('Bir araç seçin ve çizime başlayın.', width / 2, height / 2 + 26);
   ctx.restore();
 }
 
@@ -339,16 +324,19 @@ function renderScene(canvas, state) {
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, rect.width, rect.height);
-  ctx.fillStyle = '#f8fafc';
+  ctx.fillStyle = '#131316';
   ctx.fillRect(0, 0, rect.width, rect.height);
-  drawGrid(ctx, rect.width, rect.height, state.viewport);
+
+  if (!state.shapes.length) {
+    renderWelcome(canvas, ctx);
+  }
 
   ctx.save();
   ctx.translate(state.viewport.x, state.viewport.y);
   ctx.scale(state.viewport.zoom, state.viewport.zoom);
-  [...state.shapes].sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0)).forEach((shape) => {
-    renderShape(ctx, shape, state.selectedIds.includes(shape.id));
-  });
+  [...state.shapes]
+    .sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0))
+    .forEach((shape) => renderShape(ctx, shape, state.selectedIds.includes(shape.id)));
   ctx.restore();
 }
 
@@ -362,15 +350,15 @@ function createTools() {
 
   const createShape = (payload, ctx, type) => {
     drawStart = payload.world;
-    const state = ctx.getState();
+    const preset = STYLE_PRESETS[type];
     const common = {
       id: createId(),
       x: payload.world.x,
       y: payload.world.y,
-      stroke: state.stroke,
-      fill: type === 'line' || type === 'freehand' ? undefined : state.fill,
-      strokeWidth: 2,
-      opacity: 1,
+      stroke: preset.stroke,
+      fill: preset.fill,
+      strokeWidth: preset.strokeWidth,
+      opacity: preset.opacity,
     };
 
     const shape = type === 'rectangle'
@@ -387,11 +375,10 @@ function createTools() {
     ctx.store.setState((prev) => ({ ...prev, drawingShapeId: shape.id }));
   };
 
-  const completeShape = (ctx, reason) => {
+  const completeShape = (ctx) => {
     drawStart = null;
     currentShapeId = null;
     ctx.store.setState((prev) => ({ ...prev, drawingShapeId: null }));
-    ctx.store.commitHistory(reason);
   };
 
   return {
@@ -424,7 +411,6 @@ function createTools() {
       onPointerUp(_payload, ctx) {
         if (ctx.getState().isDraggingSelection) {
           ctx.store.setState((prev) => ({ ...prev, isDraggingSelection: false }));
-          ctx.store.commitHistory('move selection');
         }
         dragStartWorld = null;
         initialSelectionSnapshot = [];
@@ -434,7 +420,6 @@ function createTools() {
         if ((payload.key === 'Delete' || payload.key === 'Backspace') && state.selectedIds.length) {
           [...state.selectedIds].forEach((id) => ctx.store.deleteShape(id));
           ctx.store.setSelection([]);
-          ctx.store.commitHistory('delete shapes');
         }
       },
     },
@@ -469,7 +454,7 @@ function createTools() {
           height: Math.abs(payload.world.y - drawStart.y),
         });
       },
-      onPointerUp: (_payload, ctx) => completeShape(ctx, 'draw rectangle'),
+      onPointerUp: (_payload, ctx) => completeShape(ctx),
     },
     ellipse: {
       onPointerDown: (payload, ctx) => createShape(payload, ctx, 'ellipse'),
@@ -482,20 +467,17 @@ function createTools() {
           height: Math.abs(payload.world.y - drawStart.y),
         });
       },
-      onPointerUp: (_payload, ctx) => completeShape(ctx, 'draw ellipse'),
+      onPointerUp: (_payload, ctx) => completeShape(ctx),
     },
     line: {
       onPointerDown: (payload, ctx) => createShape(payload, ctx, 'line'),
       onPointerMove(payload, ctx) {
         if (!drawStart || !currentShapeId) return;
         ctx.store.updateShape(currentShapeId, {
-          points: [
-            { x: 0, y: 0 },
-            { x: payload.world.x - drawStart.x, y: payload.world.y - drawStart.y },
-          ],
+          points: [{ x: 0, y: 0 }, { x: payload.world.x - drawStart.x, y: payload.world.y - drawStart.y }],
         });
       },
-      onPointerUp: (_payload, ctx) => completeShape(ctx, 'draw line'),
+      onPointerUp: (_payload, ctx) => completeShape(ctx),
     },
     freehand: {
       onPointerDown: (payload, ctx) => createShape(payload, ctx, 'freehand'),
@@ -508,27 +490,26 @@ function createTools() {
           points: [...shape.points, { x: payload.world.x - drawStart.x, y: payload.world.y - drawStart.y }],
         });
       },
-      onPointerUp: (_payload, ctx) => completeShape(ctx, 'draw freehand'),
+      onPointerUp: (_payload, ctx) => completeShape(ctx),
     },
     text: {
       onPointerDown(payload, ctx) {
-        const text = window.prompt('Metin girin', 'Yeni not');
+        const text = window.prompt('Metin girin', 'Yeni metin');
         if (!text) return;
-        const state = ctx.getState();
+        const preset = STYLE_PRESETS.text;
         const shape = {
           id: createId(),
           type: 'text',
           x: payload.world.x,
           y: payload.world.y,
           text,
-          fontSize: 24,
+          fontSize: preset.fontSize,
           fontFamily: 'Inter, Arial, sans-serif',
-          stroke: state.stroke,
-          opacity: 1,
+          stroke: preset.stroke,
+          opacity: preset.opacity,
         };
         ctx.store.addShape(shape);
         ctx.store.setSelection([shape.id]);
-        ctx.store.commitHistory('create text');
       },
     },
   };
@@ -550,41 +531,18 @@ function createPointerPayload(canvas, event, viewport) {
   };
 }
 
-function createUI(root, store, bus, canvas) {
+function createUI(root, store, canvas) {
   root.innerHTML = `
     <div class="app-shell">
-      <header class="topbar">
-        <div>
-          <div class="eyebrow">Canvas Product Starter</div>
-          <h1>Excalidraw-benzeri whiteboard için başlangıç workspace’i</h1>
+      <div class="board-shell">
+        <div class="toolbar-wrap">
+          <div class="toolbar" data-toolbar></div>
+          <p class="toolbar-hint">To move canvas, hold mouse wheel or spacebar while dragging, or use the hand tool</p>
         </div>
-        <p>Pan, zoom, shape creation, selection, event log ve product roadmap aynı ekranda.</p>
-      </header>
-      <main class="workspace-layout">
         <section class="board-area">
-          <div class="toolbar"></div>
-          <div class="panel console">
-            <div class="panel-title">Event Console</div>
-            <div class="console-list" data-console-list><div>Henüz event yok.</div></div>
-          </div>
-          <div class="status-bar" data-status></div>
+          <div class="properties-panel hidden" data-properties></div>
         </section>
-        <aside class="panel sidebar">
-          <div class="panel-title">Product Direction</div>
-          <p class="panel-copy">Bu ekran, Excalidraw-benzeri ürün için mimari başlangıç ve deney alanı olarak hazırlandı.</p>
-          <div class="palette-row">
-            <label>Stroke <input data-stroke-picker type="color" /></label>
-            <label>Fill <input data-fill-picker type="color" /></label>
-            <button class="ghost-button" data-no-fill>No fill</button>
-          </div>
-          <div class="action-row">
-            <button class="ghost-button" data-reset-scene>Reset scene</button>
-            <button class="ghost-button danger" data-delete-selected>Delete selected</button>
-          </div>
-          <div class="panel-title small">Next milestones</div>
-          <ul class="roadmap">${ROADMAP.map((item) => `<li>${item}</li>`).join('')}</ul>
-        </aside>
-      </main>
+      </div>
     </div>
   `;
 
@@ -592,108 +550,161 @@ function createUI(root, store, bus, canvas) {
   boardArea.appendChild(canvas);
   canvas.className = 'board-canvas';
 
-  const toolbar = root.querySelector('.toolbar');
-  const status = root.querySelector('[data-status]');
-  const consoleList = root.querySelector('[data-console-list]');
-  const strokePicker = root.querySelector('[data-stroke-picker]');
-  const fillPicker = root.querySelector('[data-fill-picker]');
-  const noFillButton = root.querySelector('[data-no-fill]');
-  const resetButton = root.querySelector('[data-reset-scene]');
-  const deleteButton = root.querySelector('[data-delete-selected]');
-
-  let logs = [];
+  const toolbar = root.querySelector('[data-toolbar]');
+  const properties = root.querySelector('[data-properties]');
 
   const renderToolbar = (state) => {
     toolbar.innerHTML = TOOLBAR.map((tool) => `
-      <button class="tool-button ${state.activeTool === tool.key ? 'active' : ''}" data-tool="${tool.key}">
-        ${tool.label}<span>${tool.shortcut}</span>
+      <button class="tool-button ${state.activeTool === tool.key ? 'active' : ''}" data-tool="${tool.key}" title="${tool.label} (${tool.shortcut})">
+        <span class="tool-icon">${tool.icon}</span>
       </button>
     `).join('');
   };
 
-  const renderStatus = (state) => {
-    status.innerHTML = `
-      <div><strong>Tool</strong> ${state.activeTool}</div>
-      <div><strong>Zoom</strong> %${Math.round(state.viewport.zoom * 100)}</div>
-      <div><strong>Shapes</strong> ${state.shapes.length}</div>
-      <div><strong>Selected</strong> ${state.selectedIds.length}</div>
+  const selectedShape = () => {
+    const state = store.getState();
+    return state.shapes.find((shape) => shape.id === state.selectedIds[0]) || null;
+  };
+
+  const numberField = (key, label, value, min = 0, max = 100, step = 1) => `
+    <label class="field">
+      <span>${label}</span>
+      <input data-number="${key}" type="range" min="${min}" max="${max}" step="${step}" value="${value}" />
+      <strong>${value}</strong>
+    </label>
+  `;
+
+  const colorField = (key, label, value) => `
+    <label class="field color-field">
+      <span>${label}</span>
+      <input data-color="${key}" type="color" value="${value}" />
+    </label>
+  `;
+
+  const renderProperties = () => {
+    const shape = selectedShape();
+    if (!shape) {
+      properties.classList.add('hidden');
+      properties.innerHTML = '';
+      return;
+    }
+
+    const supportsFill = shape.type === 'rectangle' || shape.type === 'ellipse';
+    const supportsStroke = shape.type !== 'text' || shape.type === 'text';
+    const supportsFont = shape.type === 'text';
+    const supportsStrokeWidth = shape.type !== 'text';
+
+    properties.classList.remove('hidden');
+    properties.innerHTML = `
+      <div class="panel-header">
+        <div>
+          <div class="panel-kicker">Selected element</div>
+          <h3>${shape.type}</h3>
+        </div>
+        <button class="icon-action" data-delete-shape title="Delete">✕</button>
+      </div>
+      <div class="field-grid">
+        ${supportsStroke ? colorField('stroke', shape.type === 'text' ? 'Text color' : 'Stroke', rgbaToHex(shape.stroke || '#ffffff')) : ''}
+        ${supportsFill ? colorField('fill', 'Fill', rgbaToHex(shape.fill || '#ffffff')) : ''}
+        ${supportsFill ? numberField('fillOpacity', 'Fill opacity', Math.round(getOpacityFromColor(shape.fill || 'transparent') * 100), 0, 100, 1) : ''}
+        ${supportsStrokeWidth ? numberField('strokeWidth', 'Stroke width', shape.strokeWidth || 1, 1, 16, 1) : ''}
+        ${supportsFont ? numberField('fontSize', 'Font size', shape.fontSize || 28, 12, 96, 1) : ''}
+        ${numberField('opacity', 'Opacity', Math.round((shape.opacity ?? 1) * 100), 10, 100, 1)}
+      </div>
+      ${supportsFont ? `<label class="field"><span>Content</span><textarea data-text rows="4">${shape.text}</textarea></label>` : ''}
     `;
-    strokePicker.value = state.stroke;
-    fillPicker.value = state.fill === 'transparent' ? '#ffffff' : state.fill;
-  };
-
-  const renderConsole = () => {
-    consoleList.innerHTML = logs.length ? logs.map((line) => `<div>${line}</div>`).join('') : '<div>Henüz event yok.</div>';
-  };
-
-  const pushLog = (message) => {
-    logs = [message, ...logs].slice(0, 8);
-    renderConsole();
   };
 
   root.addEventListener('click', (event) => {
     const tool = event.target.closest('[data-tool]')?.dataset.tool;
     if (tool) store.setTool(tool);
+
+    if (event.target.closest('[data-delete-shape]')) {
+      const shape = selectedShape();
+      if (!shape) return;
+      store.deleteShape(shape.id);
+      store.setSelection([]);
+    }
   });
 
-  strokePicker.addEventListener('input', (event) => store.setState({ stroke: event.target.value }));
-  fillPicker.addEventListener('input', (event) => store.setState({ fill: event.target.value }));
-  noFillButton.addEventListener('click', () => store.setState({ fill: 'transparent' }));
-  resetButton.addEventListener('click', () => store.resetScene());
-  deleteButton.addEventListener('click', () => {
-    const { selectedIds } = store.getState();
-    [...selectedIds].forEach((id) => store.deleteShape(id));
-    store.setSelection([]);
-  });
+  properties.addEventListener('input', (event) => {
+    const shape = selectedShape();
+    if (!shape) return;
+    const target = event.target;
 
-  bus.on('tool:changed', ({ tool }) => pushLog(`tool:changed → ${tool}`));
-  bus.on('shape:created', ({ shape }) => pushLog(`shape:created → ${shape.type}:${shape.id}`));
-  bus.on('shape:updated', ({ shape }) => pushLog(`shape:updated → ${shape.type}:${shape.id}`));
-  bus.on('selection:changed', ({ ids }) => pushLog(`selection:changed → [${ids.join(', ')}]`));
-  bus.on('history:commit', ({ reason }) => pushLog(`history:commit → ${reason}`));
+    if (target.matches('[data-color="stroke"]')) {
+      store.updateShape(shape.id, { stroke: target.value });
+    }
+
+    if (target.matches('[data-color="fill"]')) {
+      const fillOpacity = properties.querySelector('[data-number="fillOpacity"]');
+      const alpha = fillOpacity ? Number(fillOpacity.value) / 100 : 1;
+      store.updateShape(shape.id, { fill: hexToRgba(target.value, alpha) });
+    }
+
+    if (target.matches('[data-number="fillOpacity"]')) {
+      const fillColor = properties.querySelector('[data-color="fill"]');
+      store.updateShape(shape.id, { fill: hexToRgba(fillColor?.value || '#ffffff', Number(target.value) / 100) });
+    }
+
+    if (target.matches('[data-number="strokeWidth"]')) {
+      store.updateShape(shape.id, { strokeWidth: Number(target.value) });
+    }
+
+    if (target.matches('[data-number="fontSize"]')) {
+      store.updateShape(shape.id, { fontSize: Number(target.value) });
+    }
+
+    if (target.matches('[data-number="opacity"]')) {
+      store.updateShape(shape.id, { opacity: Number(target.value) / 100 });
+    }
+
+    if (target.matches('[data-text]')) {
+      store.updateShape(shape.id, { text: target.value });
+    }
+  });
 
   store.subscribe((state) => {
     renderToolbar(state);
-    renderStatus(state);
+    renderProperties();
   });
 
   renderToolbar(store.getState());
-  renderStatus(store.getState());
-  renderConsole();
+  renderProperties();
 }
 
 function attachInteractions(canvas, store, tools) {
+  let activeOverrideTool = null;
+
+  const getActiveTool = () => activeOverrideTool || store.getState().activeTool;
+
   const handlePointer = (kind, event) => {
     const payload = createPointerPayload(canvas, event, store.getState().viewport);
     const ctx = { store, getState: () => store.getState() };
-    const tool = tools[store.getState().activeTool];
+    const tool = tools[getActiveTool()];
+    if (!tool) return;
 
-    if (kind === 'down') {
-      store.bus.emit('pointer:down', payload);
-      tool.onPointerDown?.(payload, ctx);
-    }
-    if (kind === 'move') {
-      store.bus.emit('pointer:move', payload);
-      tool.onPointerMove?.(payload, ctx);
-    }
-    if (kind === 'up') {
-      store.bus.emit('pointer:up', payload);
-      tool.onPointerUp?.(payload, ctx);
-    }
+    if (kind === 'down') tool.onPointerDown?.(payload, ctx);
+    if (kind === 'move') tool.onPointerMove?.(payload, ctx);
+    if (kind === 'up') tool.onPointerUp?.(payload, ctx);
   };
 
   canvas.addEventListener('pointerdown', (event) => {
+    if (event.button === 1) activeOverrideTool = 'hand';
     canvas.setPointerCapture(event.pointerId);
     handlePointer('down', event);
   });
+
   canvas.addEventListener('pointermove', (event) => handlePointer('move', event));
-  canvas.addEventListener('pointerup', (event) => handlePointer('up', event));
+
+  canvas.addEventListener('pointerup', (event) => {
+    handlePointer('up', event);
+    activeOverrideTool = null;
+  });
 
   canvas.addEventListener('wheel', (event) => {
     const rect = canvas.getBoundingClientRect();
     const screen = { x: event.clientX - rect.left, y: event.clientY - rect.top };
-    store.bus.emit('wheel', { nativeEvent: event, screen, deltaX: event.deltaX, deltaY: event.deltaY, ctrlKey: event.ctrlKey, metaKey: event.metaKey });
-
     const state = store.getState();
     if (event.ctrlKey || event.metaKey) {
       event.preventDefault();
@@ -715,16 +726,16 @@ function attachInteractions(canvas, store, tools) {
   }, { passive: false });
 
   window.addEventListener('keydown', (event) => {
-    const payload = {
-      nativeEvent: event,
-      key: event.key,
-      ctrlKey: event.ctrlKey,
-      metaKey: event.metaKey,
-      shiftKey: event.shiftKey,
-      altKey: event.altKey,
-    };
-    store.bus.emit('keyboard:down', payload);
-    tools[store.getState().activeTool].onKeyDown?.(payload, { store, getState: () => store.getState() });
+    const active = store.getState().activeTool;
+    if (event.code === 'Space' && !store.getState().isSpacePanning) {
+      store.setState((prev) => ({ ...prev, isSpacePanning: true }));
+      activeOverrideTool = 'hand';
+    }
+
+    if ((event.key === 'Delete' || event.key === 'Backspace') && active === 'select') {
+      tools.select.onKeyDown?.(event, { store, getState: () => store.getState() });
+    }
+
     if (!event.ctrlKey && !event.metaKey) {
       if (event.key === 'v') store.setTool('select');
       if (event.key === 'h') store.setTool('hand');
@@ -733,6 +744,13 @@ function attachInteractions(canvas, store, tools) {
       if (event.key === 'l') store.setTool('line');
       if (event.key === 'p') store.setTool('freehand');
       if (event.key === 't') store.setTool('text');
+    }
+  });
+
+  window.addEventListener('keyup', (event) => {
+    if (event.code === 'Space') {
+      store.setState((prev) => ({ ...prev, isSpacePanning: false, isPanning: false }));
+      activeOverrideTool = null;
     }
   });
 }
@@ -744,7 +762,7 @@ function bootstrap() {
   const store = new WhiteboardStore({}, bus);
   const tools = createTools();
 
-  createUI(root, store, bus, canvas);
+  createUI(root, store, canvas);
   attachInteractions(canvas, store, tools);
 
   const render = () => renderScene(canvas, store.getState());
